@@ -1,3 +1,19 @@
+use std::io::{self, stdout};
+
+use ratatui::{
+    Terminal,
+    crossterm::{
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    },
+    layout::{Alignment, Constraint, Layout},
+    prelude::CrosstermBackend,
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
+
 const MICROPHONE_IMG: [[u8; 17]; 26] = [
     [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 1, 1, 2, 1, 2, 1, 2, 1, 1, 0, 0, 0, 0],
@@ -14,7 +30,6 @@ const MICROPHONE_IMG: [[u8; 17]; 26] = [
     [1, 3, 5, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 4, 5, 1],
     [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0],
     [0, 1, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 1, 0],
-    // [0, 1, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 1, 0],
     [0, 1, 0, 1, 1, 2, 4, 4, 4, 4, 5, 5, 1, 1, 0, 1, 0],
     [0, 1, 0, 0, 1, 1, 5, 5, 5, 5, 5, 1, 1, 0, 0, 1, 0],
     [0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0],
@@ -22,64 +37,87 @@ const MICROPHONE_IMG: [[u8; 17]; 26] = [
     [0, 0, 0, 1, 1, 5, 5, 5, 5, 5, 5, 5, 1, 1, 0, 0, 0],
     [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0, 1, 5, 1, 0, 0, 0, 0, 0, 0, 0],
-    // [0, 0, 0, 0, 0, 0, 0, 1, 4, 1, 0, 0, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 0, 1, 1, 1, 4, 1, 1, 1, 0, 0, 0, 0, 0],
     [0, 0, 0, 0, 1, 2, 2, 1, 1, 1, 5, 5, 1, 0, 0, 0, 0],
     [0, 0, 0, 1, 2, 2, 2, 2, 2, 4, 5, 5, 5, 1, 0, 0, 0],
     [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
 ];
 
-const COLORS: [Option<(u8, u8, u8)>; 6] = [
-    None,                     // 0: transparent
-    Some((0x20, 0x20, 0x22)), // 1: 202022
-    Some((0xfa, 0xe2, 0xc6)), // 2: fae2c6
-    Some((0xc5, 0xc9, 0xc8)), // 3: c5c9c8
-    Some((0xb2, 0xbd, 0xbf)), // 4: b2bdbf
-    Some((0x54, 0x62, 0x6b)), // 5: 54626b
+const COLORS: [Option<Color>; 6] = [
+    None,
+    Some(Color::Rgb(0x20, 0x20, 0x22)),
+    Some(Color::Rgb(0xfa, 0xe2, 0xc6)),
+    Some(Color::Rgb(0xc5, 0xc9, 0xc8)),
+    Some(Color::Rgb(0xb2, 0xbd, 0xbf)),
+    Some(Color::Rgb(0x54, 0x62, 0x6b)),
 ];
 
-fn main() {
-    let height = MICROPHONE_IMG.len();
-    let width = MICROPHONE_IMG[0].len();
+fn main() -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
-    // 每次步进 2 行（因为一个字符高度包含上下两个“像素”）
-    for y in (0..height).step_by(2) {
-        for x in 0..width {
-            let top_color_idx = MICROPHONE_IMG[y][x] as usize;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-            // 兼容奇数高度的图片，防止最后一行越界
-            let bottom_color_idx = if y + 1 < height {
-                MICROPHONE_IMG[y + 1][x] as usize
-            } else {
-                0 // 越界视作透明
-            };
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
 
-            let top = COLORS[top_color_idx];
-            let bottom = COLORS[bottom_color_idx];
+            let mut text_lines = build_image_lines();
 
-            match (top, bottom) {
-                // 上下均透明：输出空格
-                (None, None) => {
-                    print!(" ");
-                }
-                // 上有色，下透明：输出前景色的 上半块 ▀
-                (Some((r, g, b)), None) => {
-                    print!("\x1b[38;2;{};{};{}m▀\x1b[0m", r, g, b);
-                }
-                // 上透明，下有色：输出前景色的 下半块 ▄
-                (None, Some((r, g, b))) => {
-                    print!("\x1b[38;2;{};{};{}m▄\x1b[0m", r, g, b);
-                }
-                // 上下均有色：输出背景色为下，前景色为上 的 上半块 ▀
-                (Some((tr, tg, tb)), Some((br, bg, bb))) => {
-                    print!(
-                        "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m▀\x1b[0m",
-                        tr, tg, tb, br, bg, bb
-                    );
-                }
-            }
+            text_lines.push(Line::from(""));
+            text_lines.push(Line::from_iter([
+                Span::raw("<Space>").underlined(),
+                Span::raw(" to record"),
+            ]));
+
+            let paragraph = Paragraph::new(text_lines).alignment(Alignment::Center);
+
+            let content_height = (MICROPHONE_IMG.len() / 2 + 2) as u16;
+
+            let [_, center_area, _] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(content_height),
+                Constraint::Fill(1),
+            ])
+            .areas(area);
+
+            frame.render_widget(paragraph, center_area);
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && (key.code == KeyCode::Char('q') || key.code == KeyCode::Esc)
+        {
+            break;
         }
-        // 每渲染完一行双层像素，进行换行
-        println!();
     }
+
+    disable_raw_mode()?;
+    execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+
+    Ok(())
+}
+
+fn build_image_lines() -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for y in (0..MICROPHONE_IMG.len()).step_by(2) {
+        let mut spans = Vec::new();
+        for (top, bottom) in MICROPHONE_IMG[y].into_iter().zip(
+            // SAFETY: img rows is known to be even at compiletime
+            MICROPHONE_IMG[y + 1].into_iter(),
+        ) {
+            let top_color = COLORS[top as usize];
+            let bottom_color = COLORS[bottom as usize];
+            let span = match (top_color, bottom_color) {
+                (None, None) => Span::raw(" "),
+                (Some(fg), None) => Span::styled("▀", Style::default().fg(fg)),
+                (None, Some(fg)) => Span::styled("▄", Style::default().fg(fg)),
+                (Some(fg), Some(bg)) => Span::styled("▀", Style::default().fg(fg).bg(bg)),
+            };
+            spans.push(span);
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
 }
