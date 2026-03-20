@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cpal = "0.17.3"
+hound = "3.5.1"
 ratatui = { version = "0.30.0", default-features = false, features = ["crossterm"] }
 
 [profile.release]

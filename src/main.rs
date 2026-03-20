@@ -1,5 +1,14 @@
-use std::io::{self, stdout};
+use std::{
+    io::{self, stdout},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+};
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ratatui::{
     Terminal,
     crossterm::{
@@ -9,56 +18,46 @@ use ratatui::{
     },
     layout::{Alignment, Constraint, Layout},
     prelude::CrosstermBackend,
-    style::{Color, Style, Stylize},
+    style::Stylize,
     text::{Line, Span},
     widgets::Paragraph,
 };
 
-const MICROPHONE_IMG: [[u8; 17]; 26] = [
-    [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 1, 1, 2, 1, 2, 1, 2, 1, 1, 0, 0, 0, 0],
-    [0, 0, 0, 1, 1, 2, 3, 1, 4, 1, 4, 5, 1, 1, 0, 0, 0],
-    [0, 0, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 0, 0],
-    [0, 0, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 0, 0],
-    [0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 1, 1, 1, 1, 0, 0, 0],
-    [0, 0, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 0, 0],
-    [0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 1, 1, 1, 1, 0, 0, 0],
-    [0, 0, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 0, 0],
-    [0, 0, 0, 1, 1, 1, 1, 4, 4, 4, 1, 1, 1, 1, 0, 0, 0],
-    [0, 1, 1, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 1, 1, 0],
-    [1, 3, 5, 1, 1, 1, 1, 4, 4, 4, 1, 1, 1, 1, 4, 5, 1],
-    [1, 3, 5, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 4, 5, 1],
-    [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0],
-    [0, 1, 0, 1, 2, 2, 4, 4, 4, 4, 4, 5, 5, 1, 0, 1, 0],
-    [0, 1, 0, 1, 1, 2, 4, 4, 4, 4, 5, 5, 1, 1, 0, 1, 0],
-    [0, 1, 0, 0, 1, 1, 5, 5, 5, 5, 5, 1, 1, 0, 0, 1, 0],
-    [0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0],
-    [0, 0, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 0, 0],
-    [0, 0, 0, 1, 1, 5, 5, 5, 5, 5, 5, 5, 1, 1, 0, 0, 0],
-    [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 1, 5, 1, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 1, 1, 1, 4, 1, 1, 1, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 1, 2, 2, 1, 1, 1, 5, 5, 1, 0, 0, 0, 0],
-    [0, 0, 0, 1, 2, 2, 2, 2, 2, 4, 5, 5, 5, 1, 0, 0, 0],
-    [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
-];
+use crate::logo::{MICROPHONE_IMG, build_image_lines};
 
-const COLORS: [Option<Color>; 6] = [
-    None,
-    Some(Color::Rgb(0x20, 0x20, 0x22)),
-    Some(Color::Rgb(0xfa, 0xe2, 0xc6)),
-    Some(Color::Rgb(0xc5, 0xc9, 0xc8)),
-    Some(Color::Rgb(0xb2, 0xbd, 0xbf)),
-    Some(Color::Rgb(0x54, 0x62, 0x6b)),
-];
+mod logo;
+
+#[derive(Debug, Clone)]
+struct GlobalState {
+    is_running: Arc<AtomicBool>,
+    is_recording: Arc<AtomicBool>,
+}
+
+impl Default for GlobalState {
+    fn default() -> Self {
+        Self {
+            is_running: Arc::new(AtomicBool::new(true)),
+            is_recording: Default::default(),
+        }
+    }
+}
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
 
+    let state = GlobalState::default();
+
+    let handler = thread::spawn({
+        let state = state.clone();
+        || {
+            record_audio(state).unwrap();
+        }
+    });
+
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    loop {
+    while state.is_running.load(Ordering::Relaxed) {
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -67,7 +66,12 @@ fn main() -> io::Result<()> {
             text_lines.push(Line::from(""));
             text_lines.push(Line::from_iter([
                 Span::raw("<Space>").underlined(),
-                Span::raw(" to record"),
+                Span::raw(" to "),
+                Span::raw(if state.is_recording.load(Ordering::Relaxed) {
+                    "stop"
+                } else {
+                    "start"
+                }),
             ]));
 
             let paragraph = Paragraph::new(text_lines).alignment(Alignment::Center);
@@ -86,11 +90,20 @@ fn main() -> io::Result<()> {
 
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-            && (key.code == KeyCode::Char('q') || key.code == KeyCode::Esc)
         {
-            break;
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    state.is_running.store(false, Ordering::Relaxed);
+                }
+                KeyCode::Char(' ') => {
+                    state.is_recording.fetch_not(Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
     }
+
+    handler.join().unwrap();
 
     disable_raw_mode()?;
     execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
@@ -98,26 +111,60 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn build_image_lines() -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for y in (0..MICROPHONE_IMG.len()).step_by(2) {
-        let mut spans = Vec::new();
-        for (top, bottom) in MICROPHONE_IMG[y].into_iter().zip(
-            // SAFETY: img rows is known to be even at compiletime
-            MICROPHONE_IMG[y + 1].into_iter(),
-        ) {
-            let top_color = COLORS[top as usize];
-            let bottom_color = COLORS[bottom as usize];
-            let span = match (top_color, bottom_color) {
-                (None, None) => Span::raw(" "),
-                (Some(fg), None) => Span::styled("▀", Style::default().fg(fg)),
-                (None, Some(fg)) => Span::styled("▄", Style::default().fg(fg)),
-                (Some(fg), Some(bg)) => Span::styled("▀", Style::default().fg(fg).bg(bg)),
-            };
-            spans.push(span);
+fn record_audio(state: GlobalState) -> Result<(), Box<dyn std::error::Error>> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().expect("no input device");
+    let config = device.default_input_config()?;
+    let sample_format = config.sample_format();
+    let err_fn = |err| eprintln!("Error: {}", err);
+
+    let spec = hound::WavSpec {
+        channels: config.channels() as u16,
+        sample_rate: config.sample_rate(),
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create("foo.wav", spec)?;
+
+    let (tx, rx) = mpsc::channel::<f32>();
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _: &_| {
+                for &sample in data {
+                    tx.send(sample).ok();
+                }
+            },
+            err_fn,
+            None,
+        )?,
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &config.into(),
+            move |data: &[i16], _: &_| {
+                for &sample in data {
+                    tx.send(cpal::Sample::to_sample::<f32>(sample)).ok();
+                }
+            },
+            err_fn,
+            None,
+        )?,
+        _ => return Err("unsupported sample format".into()),
+    };
+
+    stream.play()?;
+
+    while state.is_running.load(Ordering::Relaxed) {
+        while let Ok(sample) = rx.try_recv() {
+            if state.is_recording.load(Ordering::Relaxed) {
+                let s = (sample * i16::MAX as f32) as i16;
+                writer.write_sample(s)?;
+            }
         }
-        lines.push(Line::from(spans));
     }
 
-    lines
+    drop(stream);
+    writer.finalize()?;
+
+    Ok(())
 }
